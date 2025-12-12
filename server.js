@@ -1,0 +1,135 @@
+const express = require('express');
+const cors = require('cors');
+const { Pool } = require('pg');
+
+const app = express();
+app.use(cors());
+app.use(express.json());
+
+// Railway automaticky nastaví DATABASE_URL
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: false }
+});
+
+// --- INIT DB (tabuľky) ---
+async function initDb() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS reservations (
+      id SERIAL PRIMARY KEY,
+      date TEXT NOT NULL,
+      start_time TEXT NOT NULL,
+      end_time TEXT NOT NULL,
+      fields TEXT[] NOT NULL,
+      group_name TEXT NOT NULL
+    )
+  `);
+
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS audit_log (
+      id SERIAL PRIMARY KEY,
+      time TIMESTAMP NOT NULL,
+      action TEXT NOT NULL,
+      detail JSONB NOT NULL
+    )
+  `);
+}
+
+initDb().catch(console.error);
+
+// --- HELPERS ---
+function timeToMinutes(t){
+  const [h,m] = t.split(':').map(Number);
+  return h*60 + m;
+}
+function overlaps(aStart,aEnd,bStart,bEnd){
+  return aStart < bEnd && bStart < aEnd;
+}
+
+// --- API ---
+app.get('/reservations', async (req,res)=>{
+  const { date } = req.query;
+  const result = date
+    ? await pool.query('SELECT * FROM reservations WHERE date=$1', [date])
+    : await pool.query('SELECT * FROM reservations');
+  res.json(result.rows);
+});
+
+app.post('/reservations', async (req,res)=>{
+  const { date,start,end,fields,group } = req.body;
+
+  const s = timeToMinutes(start);
+  const e = timeToMinutes(end);
+
+  const existing = await pool.query(
+    'SELECT * FROM reservations WHERE date=$1',
+    [date]
+  );
+
+  for(const r of existing.rows){
+    if(overlaps(
+      s,e,
+      timeToMinutes(r.start_time),
+      timeToMinutes(r.end_time)
+    )){
+      for(const f of fields){
+        if(r.fields.includes(f)){
+          return res.status(400).json({error:'Kolízia rezervácie'});
+        }
+      }
+    }
+  }
+
+  const insert = await pool.query(
+    `INSERT INTO reservations
+     (date,start_time,end_time,fields,group_name)
+     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    [date,start,end,fields,group]
+  );
+
+  await pool.query(
+    'INSERT INTO audit_log (time,action,detail) VALUES ($1,$2,$3)',
+    [new Date(), 'CREATE', insert.rows[0]]
+  );
+
+  res.json(insert.rows[0]);
+});
+
+app.put('/reservations/:id', async (req,res)=>{
+  const id = Number(req.params.id);
+  const r = req.body;
+
+  const update = await pool.query(
+    `UPDATE reservations
+     SET date=$1,start_time=$2,end_time=$3,fields=$4,group_name=$5
+     WHERE id=$6 RETURNING *`,
+    [r.date,r.start,r.end,r.fields,r.group,id]
+  );
+
+  await pool.query(
+    'INSERT INTO audit_log (time,action,detail) VALUES ($1,$2,$3)',
+    [new Date(), 'UPDATE', update.rows[0]]
+  );
+
+  res.json(update.rows[0]);
+});
+
+app.delete('/reservations/:id', async (req,res)=>{
+  const id = Number(req.params.id);
+  await pool.query('DELETE FROM reservations WHERE id=$1',[id]);
+  await pool.query(
+    'INSERT INTO audit_log (time,action,detail) VALUES ($1,$2,$3)',
+    [new Date(), 'DELETE', { id }]
+  );
+  res.json({ ok:true });
+});
+
+app.get('/audit', async (req,res)=>{
+  const result = await pool.query(
+    'SELECT * FROM audit_log ORDER BY time DESC'
+  );
+  res.json(result.rows);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, ()=>console.log('Server beží na porte', PORT));
