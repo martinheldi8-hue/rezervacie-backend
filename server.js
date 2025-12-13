@@ -6,13 +6,12 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Railway automaticky nastaví DATABASE_URL
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 });
 
-// --- INIT DB (tabuľky) ---
+// --- INIT DB ---
 async function initDb() {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS reservations (
@@ -47,14 +46,29 @@ function overlaps(aStart,aEnd,bStart,bEnd){
 }
 
 // --- API ---
+
+// ✅ NORMALIZOVANÝ SELECT
+const SELECT_RESERVATIONS = `
+  SELECT
+    id,
+    date,
+    start_time AS start,
+    end_time   AS end,
+    fields,
+    group_name AS group
+  FROM reservations
+`;
+
+// GET reservations
 app.get('/reservations', async (req,res)=>{
   const { date } = req.query;
   const result = date
-    ? await pool.query('SELECT * FROM reservations WHERE date=$1', [date])
-    : await pool.query('SELECT * FROM reservations');
+    ? await pool.query(`${SELECT_RESERVATIONS} WHERE date=$1`, [date])
+    : await pool.query(SELECT_RESERVATIONS);
   res.json(result.rows);
 });
 
+// CREATE reservation
 app.post('/reservations', async (req,res)=>{
   const { date,start,end,fields,group } = req.body;
 
@@ -62,7 +76,7 @@ app.post('/reservations', async (req,res)=>{
   const e = timeToMinutes(end);
 
   const existing = await pool.query(
-    'SELECT * FROM reservations WHERE date=$1',
+    'SELECT start_time,end_time,fields FROM reservations WHERE date=$1',
     [date]
   );
 
@@ -74,16 +88,25 @@ app.post('/reservations', async (req,res)=>{
     )){
       for(const f of fields){
         if(r.fields.includes(f)){
-          return res.status(400).json({error:'Kolízia rezervácie'});
+          return res.status(400).json({ error:'Kolízia rezervácie' });
         }
       }
     }
   }
 
   const insert = await pool.query(
-    `INSERT INTO reservations
-     (date,start_time,end_time,fields,group_name)
-     VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+    `
+    INSERT INTO reservations
+    (date,start_time,end_time,fields,group_name)
+    VALUES ($1,$2,$3,$4,$5)
+    RETURNING
+      id,
+      date,
+      start_time AS start,
+      end_time   AS end,
+      fields,
+      group_name AS group
+    `,
     [date,start,end,fields,group]
   );
 
@@ -95,15 +118,25 @@ app.post('/reservations', async (req,res)=>{
   res.json(insert.rows[0]);
 });
 
+// UPDATE reservation
 app.put('/reservations/:id', async (req,res)=>{
   const id = Number(req.params.id);
-  const r = req.body;
+  const { date,start,end,fields,group } = req.body;
 
   const update = await pool.query(
-    `UPDATE reservations
-     SET date=$1,start_time=$2,end_time=$3,fields=$4,group_name=$5
-     WHERE id=$6 RETURNING *`,
-    [r.date,r.start,r.end,r.fields,r.group,id]
+    `
+    UPDATE reservations
+    SET date=$1,start_time=$2,end_time=$3,fields=$4,group_name=$5
+    WHERE id=$6
+    RETURNING
+      id,
+      date,
+      start_time AS start,
+      end_time   AS end,
+      fields,
+      group_name AS group
+    `,
+    [date,start,end,fields,group,id]
   );
 
   await pool.query(
@@ -114,6 +147,7 @@ app.put('/reservations/:id', async (req,res)=>{
   res.json(update.rows[0]);
 });
 
+// DELETE reservation
 app.delete('/reservations/:id', async (req,res)=>{
   const id = Number(req.params.id);
   await pool.query('DELETE FROM reservations WHERE id=$1',[id]);
@@ -124,6 +158,7 @@ app.delete('/reservations/:id', async (req,res)=>{
   res.json({ ok:true });
 });
 
+// AUDIT LOG
 app.get('/audit', async (req,res)=>{
   const result = await pool.query(
     'SELECT * FROM audit_log ORDER BY time DESC'
@@ -133,3 +168,4 @@ app.get('/audit', async (req,res)=>{
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=>console.log('Server beží na porte', PORT));
+
