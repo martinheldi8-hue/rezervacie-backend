@@ -46,6 +46,21 @@ function overlaps(aStart,aEnd,bStart,bEnd){
 }
 
 // --- API ---
+function toIsoDateLocal(d){
+  const y = d.getFullYear();
+  const m = String(d.getMonth()+1).padStart(2,'0');
+  const day = String(d.getDate()).padStart(2,'0');
+  return `${y}-${m}-${day}`;
+}
+
+function addDaysISO(dateStr, add){
+  const d = new Date(dateStr + 'T12:00:00'); // 12:00 kvôli DST/UTC posunom
+  d.setDate(d.getDate() + add);
+  return toIsoDateLocal(d);
+}
+app.get('/health', (req,res)=>{
+  res.json({ ok:true, time: new Date().toISOString() });
+});
 
 // ✅ NORMALIZOVANÝ SELECT
 const SELECT_RESERVATIONS = `
@@ -61,11 +76,37 @@ const SELECT_RESERVATIONS = `
 
 // GET reservations
 app.get('/reservations', async (req,res)=>{
-  const { date } = req.query;
-  const result = date
-    ? await pool.query(`${SELECT_RESERVATIONS} WHERE date=$1`, [date])
-    : await pool.query(SELECT_RESERVATIONS);
-  res.json(result.rows);
+  try{
+    const { date } = req.query;
+    const result = date
+      ? await pool.query(`${SELECT_RESERVATIONS} WHERE date=$1`, [date])
+      : await pool.query(SELECT_RESERVATIONS);
+
+    res.json(result.rows);
+  }catch(err){
+    console.error('GET /reservations error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
+});
+// GET reservations for whole week (1 request)
+// /reservations/week?start=YYYY-MM-DD   (start = pondelok)
+app.get('/reservations/week', async (req,res)=>{
+  try{
+    const { start } = req.query;
+    if(!start) return res.status(400).json({ error: 'Missing start (YYYY-MM-DD)' });
+
+    const dates = Array.from({length:7}, (_,i)=>addDaysISO(start, i));
+
+    const result = await pool.query(
+      `${SELECT_RESERVATIONS} WHERE date = ANY($1::text[])`,
+      [dates]
+    );
+
+    res.json(result.rows);
+  }catch(err){
+    console.error('GET /reservations/week error:', err);
+    res.status(500).json({ error: 'Server error' });
+  }
 });
 
 // CREATE reservation
