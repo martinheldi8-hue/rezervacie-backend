@@ -210,3 +210,13 @@ app.get('/audit', async (req,res)=>{
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, ()=>console.log('Server beží na porte', PORT));
 
+app.get('/reservations-range', async (req,res)=>{
+  const { from, to } = req.query; // ISO YYYY-MM-DD
+  if(!from || !to) return res.status(400).json({ error: 'from,to required' });
+
+  const result = await pool.query(
+    `${SELECT_RESERVATIONS} WHERE date >= $1 AND date <= $2 ORDER BY date, start_time`,
+    [from, to]
+  );
+  res.json(result.rows);
+});
